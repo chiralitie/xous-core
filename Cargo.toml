@@ -92,6 +92,8 @@ members = [
   #"services/test-spawn/spawn",
   "services/usb-test",
   "services/usb-device-xous",
+  "services/wamr-runtime",
+  "services/lvgl-runtime",
   "kernel",
   "loader",
   "libs/bio-lib",

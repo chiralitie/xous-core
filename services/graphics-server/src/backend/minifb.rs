@@ -255,7 +255,8 @@ impl MinifbThread {
             WIDTH as usize,
             HEIGHT as usize,
             WindowOptions {
-                scale_mode: minifb::ScaleMode::AspectRatioStretch,
+                scale_mode: minifb::ScaleMode::Stretch,
+                scale: minifb::Scale::X1,
                 resize: true,
                 ..WindowOptions::default()
             },

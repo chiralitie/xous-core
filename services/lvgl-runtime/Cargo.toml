@@ -1,0 +1,21 @@
+[package]
+name = "lvgl-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "LVGL graphics runtime for Xous"
+
+[dependencies]
+xous = "0.9.69"
+log-server = { package = "xous-api-log", version = "0.1.68" }
+ticktimer-server = { package = "xous-api-ticktimer", version = "0.9.68" }
+xous-names = { package = "xous-api-names", version = "0.9.70" }
+xous-ipc = "0.10.9"
+log = "0.4.14"
+num-derive = { version = "0.4.2", default-features = false }
+num-traits = { version = "0.2.14", default-features = false }
+
+[build-dependencies]
+cc = "1.0"
+
+[features]
+default = []

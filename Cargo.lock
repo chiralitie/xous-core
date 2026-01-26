@@ -3651,6 +3651,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lvgl-runtime"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "log",
+ "num-derive 0.4.2",
+ "num-traits",
+ "xous 0.9.69 (registry+https://github.com/rust-lang/crates.io-index)",
+ "xous-api-log",
+ "xous-api-names",
+ "xous-api-ticktimer",
+ "xous-ipc 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "lzma-rs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6992,6 +7007,23 @@ checksum = "d71d857dc86794ca4c280d616f7da00d2dbfd8cd788846559a6813e6aa4b54ee"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "wamr-runtime"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "keyboard",
+ "log",
+ "num-derive 0.4.2",
+ "num-traits",
+ "utralib 0.1.26",
+ "xous 0.9.69 (registry+https://github.com/rust-lang/crates.io-index)",
+ "xous-api-log",
+ "xous-api-names",
+ "xous-api-ticktimer",
+ "xous-ipc 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

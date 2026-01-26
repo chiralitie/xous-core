@@ -238,7 +238,7 @@ pub fn glyphs() -> &'static [u32] {
     #[cfg(any(feature="precursor", feature="renode"))]
     unsafe {
         let data: *const u32 = core::ptr::with_exposed_provenance::<u32>(GLYPH_LOCATION.load(core::sync::atomic::Ordering::SeqCst) as usize);
-        core::slice::from_raw_parts(data, GLYPH_LEN)
+        return core::slice::from_raw_parts(data, GLYPH_LEN);
     }
 
     #[cfg(any(not(target_os = "xous"), feature="bao1x"))]

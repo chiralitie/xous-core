@@ -1,0 +1,6 @@
+[submodule "services/wamr-runtime/wamr"]
+	path = services/wamr-runtime/wamr
+	url = https://github.com/bytecodealliance/wasm-micro-runtime.git
+[submodule "services/lvgl-lib"]
+	path = services/lvgl-lib
+	url = https://github.com/lvgl/lvgl.git

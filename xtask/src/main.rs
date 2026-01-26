@@ -81,6 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "keyboard",        // required by graphics-server
             "spinor",          // required by keyboard - to save key mapping
             "llio",            // required by spinor
+            "wamr-runtime",    // WebAssembly runtime for embedded apps
+            "lvgl-runtime",    // LVGL graphics library runtime
         ],
     ]
     .concat();
