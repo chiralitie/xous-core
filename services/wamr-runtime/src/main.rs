@@ -13,10 +13,113 @@ use log::info;
 // WAMR Runtime implementation
 mod wamr {
     use super::wamr_ffi::*;
+    use super::native_funcs::*;
     use log::{info, error};
     use core::ptr;
 
     const ERROR_BUF_SIZE: usize = 256;
+
+    // Helper macro to create NativeSymbol at runtime
+    fn make_native_symbols() -> Vec<NativeSymbol> {
+        vec![
+            // Clipin Core APIs
+            NativeSymbol {
+                symbol: b"clipin_log\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_clipin_log as *const core::ffi::c_void,
+                signature: b"($)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"clipin_get_uptime\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_clipin_get_uptime as *const core::ffi::c_void,
+                signature: b"()i\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"clipin_button_read\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_clipin_button_read as *const core::ffi::c_void,
+                signature: b"(i)i\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            // LVGL Display APIs
+            NativeSymbol {
+                symbol: b"lvgl_get_lcd\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_get_lcd as *const core::ffi::c_void,
+                signature: b"()i\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_get_screen\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_get_screen as *const core::ffi::c_void,
+                signature: b"()i\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_create_label\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_create_label as *const core::ffi::c_void,
+                signature: b"(i$)i\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_create_button\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_create_button as *const core::ffi::c_void,
+                signature: b"(i$)i\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_set_text\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_set_text as *const core::ffi::c_void,
+                signature: b"(i$)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_set_pos\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_set_pos as *const core::ffi::c_void,
+                signature: b"(iii)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_set_size\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_set_size as *const core::ffi::c_void,
+                signature: b"(iii)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_align\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_align as *const core::ffi::c_void,
+                signature: b"(iiii)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_delete\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_delete as *const core::ffi::c_void,
+                signature: b"(i)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_set_style_text_color\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_set_style_text_color as *const core::ffi::c_void,
+                signature: b"(iiii)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            NativeSymbol {
+                symbol: b"lvgl_set_style_bg_color\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_lvgl_set_style_bg_color as *const core::ffi::c_void,
+                signature: b"(iiii)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+            // Legacy/Alias APIs
+            NativeSymbol {
+                symbol: b"print\0".as_ptr() as *const core::ffi::c_char,
+                func_ptr: native_print as *const core::ffi::c_void,
+                signature: b"($)\0".as_ptr() as *const core::ffi::c_char,
+                attachment: ptr::null(),
+            },
+        ]
+    }
+
+    // Keep native symbols alive for the lifetime of the runtime
+    static mut NATIVE_SYMBOLS_STORAGE: Option<Vec<NativeSymbol>> = None;
 
     pub struct WamrRuntime {
         initialized: bool,
@@ -36,121 +139,40 @@ mod wamr {
                 exec_env: ptr::null_mut(),
             };
 
-            // Register native LVGL functions
-            use super::native_funcs::*;
-
-            let native_symbols = [
-                // ============================================================
-                // Clipin Core APIs
-                // ============================================================
-                NativeSymbol {
-                    symbol: b"clipin_log\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_clipin_log as *const core::ffi::c_void,
-                    signature: b"($)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"clipin_get_uptime\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_clipin_get_uptime as *const core::ffi::c_void,
-                    signature: b"()i\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"clipin_button_read\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_clipin_button_read as *const core::ffi::c_void,
-                    signature: b"(i)i\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                // ============================================================
-                // LVGL Display APIs
-                // ============================================================
-                NativeSymbol {
-                    symbol: b"lvgl_get_lcd\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_get_lcd as *const core::ffi::c_void,
-                    signature: b"()i\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_get_screen\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_get_screen as *const core::ffi::c_void,
-                    signature: b"()i\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_create_label\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_create_label as *const core::ffi::c_void,
-                    signature: b"(i$)i\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_create_button\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_create_button as *const core::ffi::c_void,
-                    signature: b"(i$)i\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_set_text\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_set_text as *const core::ffi::c_void,
-                    signature: b"(i$)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_set_pos\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_set_pos as *const core::ffi::c_void,
-                    signature: b"(iii)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_set_size\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_set_size as *const core::ffi::c_void,
-                    signature: b"(iii)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_align\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_align as *const core::ffi::c_void,
-                    signature: b"(iiii)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_delete\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_delete as *const core::ffi::c_void,
-                    signature: b"(i)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_set_style_text_color\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_set_style_text_color as *const core::ffi::c_void,
-                    signature: b"(iiii)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                NativeSymbol {
-                    symbol: b"lvgl_set_style_bg_color\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_lvgl_set_style_bg_color as *const core::ffi::c_void,
-                    signature: b"(iiii)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-                // ============================================================
-                // Legacy/Alias APIs
-                // ============================================================
-                NativeSymbol {
-                    symbol: b"print\0".as_ptr() as *const core::ffi::c_char,
-                    func_ptr: native_print as *const core::ffi::c_void,
-                    signature: b"($)\0".as_ptr() as *const core::ffi::c_char,
-                    attachment: ptr::null(),
-                },
-            ];
-
-            // Initialize WAMR with native symbols
-            let init_args = RuntimeInitArgs::new_with_native_symbols(
-                native_symbols.as_ptr(),
-                native_symbols.len() as u32,
-            );
-            let result = unsafe { wasm_runtime_full_init(&init_args) };
+            // First try basic initialization
+            let result = unsafe { wasm_runtime_init() };
 
             if result {
-                runtime.initialized = true;
-                info!("WAMR runtime initialized with {} native functions", native_symbols.len());
+                info!("WAMR basic init succeeded");
+
+                // Create and store native symbols
+                let native_symbols = make_native_symbols();
+                let symbols_ptr = native_symbols.as_ptr();
+                let symbols_len = native_symbols.len() as u32;
+
+                // Store in static to keep alive
+                unsafe {
+                    NATIVE_SYMBOLS_STORAGE = Some(native_symbols);
+                }
+
+                // Now register native symbols
+                info!("Registering {} native symbols...", symbols_len);
+                let reg_result = unsafe {
+                    wasm_runtime_register_natives(
+                        b"env\0".as_ptr() as *const core::ffi::c_char,
+                        symbols_ptr,
+                        symbols_len,
+                    )
+                };
+
+                if reg_result {
+                    runtime.initialized = true;
+                    info!("WAMR runtime initialized with {} native functions", symbols_len);
+                } else {
+                    error!("Failed to register native symbols");
+                    // Still mark as initialized - we can run WASM without native functions
+                    runtime.initialized = true;
+                }
             } else {
                 error!("Failed to initialize WAMR runtime");
             }
@@ -396,9 +418,10 @@ fn main() -> ! {
     let mut app_running = false;
     let mut has_app_tick = false;
 
-    // WASM execution in hosted mode crashes due to memory mapping differences
-    // between WAMR's WASM memory and the host process address space.
-    // Disable for now until this is fixed.
+    // WASM execution in hosted mode crashes during wasm_runtime_load() due to
+    // memory management differences between WAMR and the hosted Xous environment.
+    // The WAMR runtime initializes correctly, but loading WASM modules fails.
+    // Use Renode for WASM testing until this is fixed.
     #[cfg(target_os = "xous")]
     {
         // Load and execute test WASM module
@@ -436,7 +459,7 @@ fn main() -> ! {
 
     #[cfg(not(target_os = "xous"))]
     {
-        info!("WAMR runtime ready (WASM execution disabled in hosted mode - needs memory mapping fix)");
+        info!("WASM execution disabled in hosted mode (use Renode for WASM testing)");
         let _ = (&mut app_running, &mut has_app_tick); // suppress unused warnings
     }
 

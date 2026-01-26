@@ -66,6 +66,10 @@ pub struct NativeSymbol {
     pub attachment: *const c_void,
 }
 
+// Safety: NativeSymbol contains only function pointers and static string pointers
+// which are safe to share between threads (they point to static data)
+unsafe impl Sync for NativeSymbol {}
+
 // Memory allocator types
 pub const ALLOC_WITH_POOL: u32 = 0;
 pub const ALLOC_WITH_ALLOCATOR: u32 = 1;
@@ -76,6 +80,12 @@ extern "C" {
     pub fn wasm_runtime_init() -> bool;
     pub fn wasm_runtime_full_init(init_args: *const RuntimeInitArgs) -> bool;
     pub fn wasm_runtime_destroy();
+
+    pub fn wasm_runtime_register_natives(
+        module_name: *const c_char,
+        native_symbols: *const NativeSymbol,
+        n_native_symbols: u32,
+    ) -> bool;
 
     pub fn wasm_runtime_load(
         buf: *const u8,
