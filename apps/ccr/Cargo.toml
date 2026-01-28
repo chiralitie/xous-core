@@ -16,6 +16,7 @@ ticktimer-server = { package = "xous-api-ticktimer", version = "0.9.68" }
 gam = { path = "../../services/gam" }
 ux-api = { path = "../../libs/ux-api" }
 blitstr2 = { path = "../../libs/blitstr2" }
+pddb = { path = "../../services/pddb" }
 
 [features]
 default = []

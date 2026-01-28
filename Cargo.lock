@@ -957,6 +957,7 @@ dependencies = [
  "log",
  "num-derive 0.4.2",
  "num-traits",
+ "pddb",
  "ux-api",
  "xous 0.9.69 (registry+https://github.com/rust-lang/crates.io-index)",
  "xous-api-log",

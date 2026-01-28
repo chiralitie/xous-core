@@ -18,7 +18,15 @@ pub(crate) const SERVER_NAME_CCR: &str = "_CCR Benchmark_";
 #[derive(Debug, num_derive::FromPrimitive, num_derive::ToPrimitive)]
 pub(crate) enum CcrOp {
     Redraw = 0,
+    RunBenchmarks,
     Quit,
+}
+
+#[derive(PartialEq)]
+enum State {
+    Initial,
+    Running,
+    Done,
 }
 
 struct Ccr {
@@ -27,6 +35,8 @@ struct Ccr {
     _gam_token: [u32; 4],
     screensize: Point,
     results: Option<alloc::string::String>,
+    state: State,
+    sid: xous::SID,
 }
 
 extern crate alloc;
@@ -59,6 +69,8 @@ impl Ccr {
             content,
             screensize,
             results: None,
+            state: State::Initial,
+            sid,
         }
     }
 
@@ -75,30 +87,33 @@ impl Ccr {
             .expect("can't clear content area");
     }
 
+    fn schedule_benchmarks(&self) {
+        // Send message to self to run benchmarks after redraw
+        xous::send_message(
+            xous::connect(self.sid).unwrap(),
+            xous::Message::new_scalar(CcrOp::RunBenchmarks.to_usize().unwrap(), 0, 0, 0, 0),
+        ).ok();
+    }
+
     fn run_benchmarks(&mut self) {
         log::info!("CCR: Running benchmarks...");
-        let results = bench::run_all_benchmarks();
+        let results = bench::run_all_benchmarks(true);
         self.results = Some(results);
+        self.state = State::Done;
         log::info!("CCR: Benchmarks complete");
     }
 
     fn redraw(&mut self) {
         self.clear_area();
 
-        // Run benchmarks on first redraw if not done yet
-        if self.results.is_none() {
-            self.run_benchmarks();
-        }
-
-        // Center the text view on screen
         let mut text_view = TextView::new(
             self.content,
             TextBounds::GrowableFromBr(
                 Point::new(
-                    self.screensize.x - 20,  // Right edge with margin
-                    self.screensize.y - 50,  // Bottom with margin
+                    self.screensize.x - 20,
+                    self.screensize.y - 50,
                 ),
-                (self.screensize.x - 40) as u16,  // Max width
+                (self.screensize.x - 40) as u16,
             ),
         );
 
@@ -108,12 +123,23 @@ impl Ccr {
         text_view.rounded_border = Some(3);
         text_view.style = GlyphStyle::Small;
 
-        if let Some(ref results) = self.results {
-            write!(text_view.text, "CCR Benchmarks\n\n{}", results)
-                .expect("Could not write to text view");
-        } else {
-            write!(text_view.text, "CCR Benchmarks\n\nRunning...")
-                .expect("Could not write to text view");
+        match self.state {
+            State::Initial => {
+                write!(text_view.text, "CCR Benchmarks\n\nStarting...")
+                    .expect("Could not write to text view");
+                self.state = State::Running;
+                self.schedule_benchmarks();
+            }
+            State::Running => {
+                write!(text_view.text, "CCR Benchmarks\n\nRunning...\n\nPlease wait")
+                    .expect("Could not write to text view");
+            }
+            State::Done => {
+                if let Some(ref results) = self.results {
+                    write!(text_view.text, "CCR Benchmarks\n\n{}", results)
+                        .expect("Could not write to text view");
+                }
+            }
         }
 
         self.gam.post_textview(&mut text_view).expect("Could not render text view");
@@ -139,6 +165,11 @@ fn main() -> ! {
             Some(CcrOp::Redraw) => {
                 log::debug!("CCR redraw");
                 ccr.redraw();
+            }
+            Some(CcrOp::RunBenchmarks) => {
+                log::info!("CCR running benchmarks");
+                ccr.run_benchmarks();
+                ccr.redraw();  // Redraw with results
             }
             Some(CcrOp::Quit) => {
                 log::info!("CCR quitting");

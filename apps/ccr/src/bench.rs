@@ -6,33 +6,62 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
+use core::fmt::Write;
+
+/// PDDB dictionary name for CCR
+const CCR_DICT: &str = "ccr.bench";
 
 /// Run all benchmarks and return results as a string
-pub fn run_all_benchmarks() -> String {
+pub fn run_all_benchmarks(with_pddb: bool) -> String {
     let tt = ticktimer_server::Ticktimer::new().unwrap();
-    let iterations = 1000u32;  // Reduced for faster results
+    let iterations = 1000u32;
 
     log::info!("CCR: Starting benchmarks ({} iterations)", iterations);
 
     let mut results = String::new();
 
-    // JSON parse benchmark
+    // RAM-only benchmarks
     let json_result = bench_json_parse(&tt, iterations);
-    results.push_str(&format!("JSON Parse:\n  {} ops/sec\n\n", json_result));
+    writeln!(results, "JSON Parse:\n  {} ops/sec", json_result).ok();
 
-    // MQTT parse benchmark
     let mqtt_result = bench_mqtt_parse(&tt, iterations);
-    results.push_str(&format!("MQTT Parse:\n  {} ops/sec\n\n", mqtt_result));
+    writeln!(results, "MQTT Parse:\n  {} ops/sec", mqtt_result).ok();
 
-    // Event queue benchmark
     let queue_result = bench_event_queue(&tt, iterations);
-    results.push_str(&format!("Event Queue:\n  {} ops/sec\n\n", queue_result));
+    writeln!(results, "Event Queue:\n  {} ops/sec", queue_result).ok();
 
-    // Full pipeline benchmark
     let pipeline_result = bench_full_pipeline(&tt, iterations);
-    results.push_str(&format!("Full Pipeline:\n  {} ops/sec\n", pipeline_result));
+    writeln!(results, "Full Pipeline:\n  {} ops/sec", pipeline_result).ok();
+
+    // PDDB benchmarks (if requested and available)
+    if with_pddb {
+        writeln!(results, "\n--- PDDB Tests ---").ok();
+
+        let poller = pddb::PddbMountPoller::new();
+        if poller.is_mounted_nonblocking() {
+            let pddb = pddb::Pddb::new();
+            let pddb_iterations = 100u32;  // Fewer iterations for slow PDDB
+
+            let write_result = bench_pddb_write(&tt, &pddb, pddb_iterations);
+            writeln!(results, "PDDB Write:\n  {} ops/sec", write_result).ok();
+
+            let read_result = bench_pddb_read(&tt, &pddb, pddb_iterations);
+            writeln!(results, "PDDB Read:\n  {} ops/sec", read_result).ok();
+
+            // Cleanup
+            pddb.delete_key(CCR_DICT, "bench_key", None).ok();
+            pddb.delete_dict(CCR_DICT, None).ok();
+        } else {
+            writeln!(results, "PDDB not mounted\n(init root keys first)").ok();
+        }
+    }
 
     results
+}
+
+/// Run benchmarks without PDDB (default)
+pub fn run_ram_benchmarks() -> String {
+    run_all_benchmarks(false)
 }
 
 fn bench_json_parse(tt: &ticktimer_server::Ticktimer, iterations: u32) -> u32 {
@@ -93,6 +122,55 @@ fn bench_full_pipeline(tt: &ticktimer_server::Ticktimer, iterations: u32) -> u32
             if queue.len() > 32 {
                 queue.remove(0);
             }
+        }
+    }
+
+    let elapsed = tt.elapsed_ms() - start;
+    if elapsed > 0 { ((iterations as u64) * 1000 / elapsed) as u32 } else { 0 }
+}
+
+fn bench_pddb_write(tt: &ticktimer_server::Ticktimer, pddb: &pddb::Pddb, iterations: u32) -> u32 {
+    use std::io::Write;
+
+    let test_data = b"test_value_for_benchmark_1234567890";
+
+    let start = tt.elapsed_ms();
+
+    for i in 0..iterations {
+        let key = format!("bench_{}", i);
+        if let Ok(mut pddb_key) = pddb.get(CCR_DICT, &key, None, true, true, None, None::<fn()>) {
+            pddb_key.write(test_data).ok();
+        }
+    }
+    pddb.sync().ok();
+
+    let elapsed = tt.elapsed_ms() - start;
+
+    // Cleanup
+    for i in 0..iterations {
+        let key = format!("bench_{}", i);
+        pddb.delete_key(CCR_DICT, &key, None).ok();
+    }
+
+    if elapsed > 0 { ((iterations as u64) * 1000 / elapsed) as u32 } else { 0 }
+}
+
+fn bench_pddb_read(tt: &ticktimer_server::Ticktimer, pddb: &pddb::Pddb, iterations: u32) -> u32 {
+    use std::io::{Read, Write};
+
+    // Setup: write a key to read
+    let test_data = b"test_value_for_benchmark_1234567890";
+    if let Ok(mut pddb_key) = pddb.get(CCR_DICT, "bench_key", None, true, true, None, None::<fn()>) {
+        pddb_key.write(test_data).ok();
+    }
+    pddb.sync().ok();
+
+    let start = tt.elapsed_ms();
+
+    for _ in 0..iterations {
+        if let Ok(mut pddb_key) = pddb.get(CCR_DICT, "bench_key", None, false, false, None, None::<fn()>) {
+            let mut buf = [0u8; 64];
+            pddb_key.read(&mut buf).ok();
         }
     }
 
