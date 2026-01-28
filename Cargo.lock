@@ -949,6 +949,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccr"
+version = "0.1.0"
+dependencies = [
+ "blitstr2",
+ "gam",
+ "log",
+ "num-derive 0.4.2",
+ "num-traits",
+ "ux-api",
+ "xous 0.9.69 (registry+https://github.com/rust-lang/crates.io-index)",
+ "xous-api-log",
+ "xous-api-names",
+ "xous-api-ticktimer",
+ "xous-ipc 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

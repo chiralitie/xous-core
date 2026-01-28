@@ -24,6 +24,18 @@
             }
         }
     },
+    "ccr": {
+        "context_name": "CCR Benchmark",
+        "menu_name": {
+            "appmenu.ccr": {
+                "en": "CCR Benchmark",
+                "en-tts": "CCR Benchmark",
+                "fr": "CCR Benchmark",
+                "ja": "CCR Benchmark",
+                "zh": "CCR Benchmark"
+            }
+        }
+    },
     "chat-test": {
         "context_name": "Chat UI test",
         "menu_name": {

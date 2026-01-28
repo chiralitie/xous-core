@@ -92,6 +92,7 @@ members = [
   #"services/test-spawn/spawn",
   "services/usb-test",
   "services/usb-device-xous",
+  "apps/ccr",
   "kernel",
   "loader",
   "libs/bio-lib",
