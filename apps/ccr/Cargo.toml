@@ -2,7 +2,7 @@
 name = "ccr"
 version = "0.1.0"
 edition = "2021"
-description = "Claude Code Remote - Benchmark App for Precursor"
+description = "Claude Code Remote - Companion display for Precursor"
 
 [dependencies]
 log = "0.4.14"
@@ -16,7 +16,6 @@ ticktimer-server = { package = "xous-api-ticktimer", version = "0.9.68" }
 gam = { path = "../../services/gam" }
 ux-api = { path = "../../libs/ux-api" }
 blitstr2 = { path = "../../libs/blitstr2" }
-pddb = { path = "../../services/pddb" }
 
 [features]
 default = []
