@@ -1,6 +1,8 @@
 #![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 
 use minifb::{Key, Window, WindowOptions};
 use ux_api::minigfx::{ColorNative, FrameBuffer, PixelColor, Point};
@@ -255,7 +257,8 @@ impl MinifbThread {
             WIDTH as usize,
             HEIGHT as usize,
             WindowOptions {
-                scale_mode: minifb::ScaleMode::AspectRatioStretch,
+                scale_mode: minifb::ScaleMode::Stretch,
+                scale: minifb::Scale::X1,
                 resize: true,
                 ..WindowOptions::default()
             },
@@ -272,6 +275,72 @@ impl MinifbThread {
         let kbd = keyboard::Keyboard::new(&xns).expect("GFX|hosted can't connect to KBD for emulation");
         let keyboard_handler = Box::new(XousKeyboardHandler { kbd, left_shift: false, right_shift: false });
         window.set_input_callback(keyboard_handler);
+
+        // Start TCP key injection server on port 7684
+        std::thread::spawn(move || {
+            let listener = match TcpListener::bind("127.0.0.1:7684") {
+                Ok(l) => l,
+                Err(e) => {
+                    log::error!("GFX|hosted: Failed to bind TCP key injection server on port 7684: {}", e);
+                    return;
+                }
+            };
+            log::info!("GFX|hosted: TCP key injection server listening on port 7684");
+
+            // Create a new keyboard connection for this thread
+            let xns_tcp = xous_names::XousNames::new().unwrap();
+            let kbd_tcp = keyboard::Keyboard::new(&xns_tcp).expect("GFX|hosted: TCP thread can't connect to KBD");
+
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut stream) => {
+                        // Create a new keyboard connection for each client
+                        let xns_conn = xous_names::XousNames::new().unwrap();
+                        let kbd_conn = keyboard::Keyboard::new(&xns_conn).expect("GFX|hosted: TCP client can't connect to KBD");
+                        std::thread::spawn(move || {
+                            let reader = BufReader::new(stream.try_clone().unwrap());
+                            for line in reader.lines() {
+                                match line {
+                                    Ok(cmd) => {
+                                        let cmd = cmd.trim();
+                                        log::debug!("GFX|hosted: TCP key command: {}", cmd);
+                                        let c = match cmd {
+                                            "up" => '↑',
+                                            "down" => '↓',
+                                            "left" => '←',
+                                            "right" => '→',
+                                            "home" | "center" | "menu" => '∴',
+                                            "enter" | "return" | "select" => '\r',
+                                            "backspace" => '\u{0008}',
+                                            "space" => ' ',
+                                            "tab" => '\t',
+                                            "f1" => '\u{0011}',
+                                            "f2" => '\u{0012}',
+                                            "f3" => '\u{0013}',
+                                            "f4" => '\u{0014}',
+                                            s if s.len() == 1 => s.chars().next().unwrap(),
+                                            _ => {
+                                                log::warn!("GFX|hosted: Unknown key command: {}", cmd);
+                                                continue;
+                                            }
+                                        };
+                                        kbd_conn.hostmode_inject_key(c);
+                                        let _ = stream.write_all(b"OK\n");
+                                    }
+                                    Err(e) => {
+                                        log::debug!("GFX|hosted: TCP read error: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        log::error!("GFX|hosted: TCP accept error: {}", e);
+                    }
+                }
+            }
+        });
 
         let mut native_buffer = Vec::new();
 

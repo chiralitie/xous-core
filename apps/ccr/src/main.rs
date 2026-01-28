@@ -104,7 +104,7 @@ impl CcrApp {
 
     /// Create new CCR application (non-Xous, for testing)
     #[cfg(not(target_os = "xous"))]
-    fn new(_xns: &(), sid: xous::SID) -> Self {
+    fn new(xns: &xous_names::XousNames, sid: xous::SID) -> Self {
         Self {
             events: EventQueue::new(),
             ui: UiState::new(),
@@ -133,22 +133,22 @@ impl CcrApp {
     /// Handle key press
     fn handle_key(&mut self, key: char) {
         match key {
-            // Up arrow
-            '\u{0011}' | 'k' => {
+            // Up arrow (Unicode arrow or F1 key code)
+            '↑' | '\u{0011}' | 'k' => {
                 self.ui.scroll_up();
             }
-            // Down arrow
-            '\u{0012}' | 'j' => {
+            // Down arrow (Unicode arrow or F2 key code)
+            '↓' | '\u{0012}' | 'j' => {
                 self.ui.scroll_down(self.events.len());
             }
-            // Left arrow - deny
-            '\u{0013}' | 'h' => {
+            // Left arrow - deny (Unicode arrow or F3 key code)
+            '←' | '\u{0013}' | 'h' => {
                 if let Some(idx) = self.ui.selected {
                     self.handle_permission_response(idx, false);
                 }
             }
-            // Right arrow - approve
-            '\u{0014}' | 'l' => {
+            // Right arrow - approve (Unicode arrow or F4 key code)
+            '→' | '\u{0014}' | 'l' => {
                 if let Some(idx) = self.ui.selected {
                     self.handle_permission_response(idx, true);
                 }
@@ -310,7 +310,19 @@ fn main() -> ! {
             }
             Some(CcrOp::RawKey) => {
                 log::debug!("CCR: RawKey");
-                // TODO: Extract raw key and call app.handle_key()
+                // Extract raw keys from scalar message
+                if let xous::Message::Scalar(scalar) = msg.body {
+                    // Keys are sent as 4 chars in arg1-arg4
+                    for &key_val in &[scalar.arg1, scalar.arg2, scalar.arg3, scalar.arg4] {
+                        if key_val != 0 {
+                            if let Some(c) = char::from_u32(key_val as u32) {
+                                log::debug!("CCR: Key pressed: {:?} (0x{:04x})", c, key_val);
+                                app.handle_key(c);
+                                app.redraw();
+                            }
+                        }
+                    }
+                }
             }
             Some(CcrOp::MqttMessage) => {
                 log::debug!("CCR: MQTT message");
