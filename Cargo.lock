@@ -963,6 +963,7 @@ dependencies = [
  "xous-api-names",
  "xous-api-ticktimer",
  "xous-ipc 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "xous-mqtt",
 ]
 
 [[package]]
@@ -7649,6 +7650,18 @@ dependencies = [
  "utralib 0.1.26",
  "xous 0.9.69 (registry+https://github.com/rust-lang/crates.io-index)",
  "xous-api-log",
+ "xous-ipc 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "xous-mqtt"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "net",
+ "tls",
+ "xous 0.9.69 (registry+https://github.com/rust-lang/crates.io-index)",
+ "xous-api-ticktimer",
  "xous-ipc 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

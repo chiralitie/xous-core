@@ -17,5 +17,8 @@ gam = { path = "../../services/gam" }
 ux-api = { path = "../../libs/ux-api" }
 blitstr2 = { path = "../../libs/blitstr2" }
 
+# MQTT client library
+xous-mqtt = { path = "../../libs/mqtt" }
+
 [features]
 default = []

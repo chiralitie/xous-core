@@ -102,6 +102,7 @@ members = [
   "libs/flatipc-derive",
   "libs/perflib",
   "libs/tls",
+  "libs/mqtt",
   "libs/userprefs",
   # "libs/xous-pio",
   "libs/xous-bio",

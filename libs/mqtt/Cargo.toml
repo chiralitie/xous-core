@@ -1,0 +1,37 @@
+[package]
+name = "xous-mqtt"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal MQTT 3.1.1 client for Xous OS"
+authors = ["Xous Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+log = "0.4.14"
+
+# Xous dependencies (optional, for native client)
+xous = { version = "0.9.69", optional = true }
+xous-ipc = { version = "0.10.9", optional = true }
+ticktimer-server = { package = "xous-api-ticktimer", version = "0.9.68", optional = true }
+net = { path = "../../services/net", optional = true }
+
+# TLS support (optional)
+tls = { path = "../tls", optional = true }
+
+[features]
+default = []
+
+# Enable full Xous client with TCP networking
+xous-client = ["xous", "xous-ipc", "ticktimer-server", "net"]
+
+# Enable TLS/SSL support (MQTT over TLS, port 8883)
+tls-support = ["xous-client", "tls"]
+
+# QoS levels
+qos1 = []           # At-least-once delivery
+qos2 = []           # Exactly-once delivery (requires state persistence)
+
+# Platform features (inherited from dependencies)
+precursor = []
+hosted = []
+renode = []
