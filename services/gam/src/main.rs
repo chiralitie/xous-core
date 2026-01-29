@@ -637,13 +637,14 @@ fn wrapped_main() -> ! {
             Some(Opcode::SwitchToApp) => {
                 let buffer = unsafe { Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
                 let switchapp = buffer.to_original::<SwitchToApp, _>().unwrap();
-                log::debug!(
-                    "trying to switch to {:?} with token {:?}",
+                log::info!(
+                    "SwitchToApp: target='{}', caller_token={:x?}",
                     switchapp.app_name.as_str(),
                     switchapp.token
                 );
 
                 if let Some(new_app_token) = context_mgr.find_app_token_by_name(switchapp.app_name.as_str()) {
+                    log::debug!("SwitchToApp: found app token {:x?}", new_app_token);
                     if new_app_token != context_mgr.focused_app().unwrap_or([0, 0, 0, 0]) {
                         // two things:
                         // 1. [0, 0, 0, 0] is simply a very unlikely GID because it's a 128 bit TRNG, and this
@@ -670,31 +671,46 @@ fn wrapped_main() -> ! {
                         ]
                         .concat()
                         .to_vec();
-                        for switchers in authorized_switchers {
-                            if let Some(auth_token) = context_mgr.find_app_token_by_name(switchers) {
+                        let mut authorized = false;
+                        for switcher in &authorized_switchers {
+                            if let Some(auth_token) = context_mgr.find_app_token_by_name(switcher) {
                                 if auth_token == switchapp.token {
+                                    log::info!("SwitchToApp: authorized by '{}'", switcher);
+                                    authorized = true;
                                     match context_mgr.activate(&gfx, &mut canvases, new_app_token, false) {
-                                        Ok(_) => (),
-                                        Err(_) => log::warn!(
-                                            "failed to switch to {}, silent error!",
-                                            switchapp.app_name.as_str()
+                                        Ok(_) => log::info!("SwitchToApp: activated '{}' successfully", switchapp.app_name.as_str()),
+                                        Err(e) => log::warn!(
+                                            "SwitchToApp: failed to activate '{}': {:?}",
+                                            switchapp.app_name.as_str(),
+                                            e
                                         ),
                                     }
-                                    continue;
+                                    break;
                                 }
                             }
                         }
                         // this message came from ourselves
-                        if gam_token == switchapp.token {
+                        if !authorized && gam_token == switchapp.token {
+                            log::info!("SwitchToApp: authorized by GAM self-token");
                             match context_mgr.activate(&gfx, &mut canvases, new_app_token, true) {
-                                Ok(_) => (),
-                                Err(_) => log::warn!(
-                                    "failed to switch to {}, silent error!",
-                                    switchapp.app_name.as_str()
+                                Ok(_) => log::info!("SwitchToApp: activated '{}' successfully", switchapp.app_name.as_str()),
+                                Err(e) => log::warn!(
+                                    "SwitchToApp: failed to activate '{}': {:?}",
+                                    switchapp.app_name.as_str(),
+                                    e
                                 ),
                             }
+                            authorized = true;
                         }
+                        if !authorized {
+                            log::warn!("SwitchToApp: caller token {:x?} not authorized to switch to '{}'",
+                                switchapp.token, switchapp.app_name.as_str());
+                        }
+                    } else {
+                        log::debug!("SwitchToApp: '{}' is already focused, ignoring", switchapp.app_name.as_str());
                     }
+                } else {
+                    log::warn!("SwitchToApp: app '{}' not found (not registered?)", switchapp.app_name.as_str());
                 }
             }
             Some(Opcode::RaiseMenu) => {

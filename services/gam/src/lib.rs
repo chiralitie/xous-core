@@ -39,7 +39,6 @@ pub const EMOJI_MENU_NAME: &'static str = "emoji menu";
 pub const SHARED_MODAL_NAME: &'static str = "shared modal";
 pub const STATUS_BAR_NAME: &'static str = "status";
 pub const APP_NAME_SHELLCHAT: &'static str = "shellchat";
-pub const APP_NAME_CCR: &'static str = "ccr";
 pub const APP_NAME_HELLO: &'static str = "hello";
 pub const APP_MENU_NAME: &'static str = "app menu";
 pub const WIFI_MENU_NAME: &'static str = "WLAN menu";

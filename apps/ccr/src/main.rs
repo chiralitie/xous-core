@@ -1,7 +1,12 @@
 //! CCR - Claude Code Remote
 //!
-//! Main entry point for the CCR application.
-//! This is a Xous app that displays Claude Code events.
+//! Real-time Claude Code session monitor for Precursor hardware.
+//! Displays events from ccr_bridge.py via MQTT.
+//!
+//! MQTT Topics:
+//! - ccr/events: All events for display
+//! - ccr/permissions/request: Permission requests (subscribe)
+//! - ccr/permissions/response: Permission responses (publish)
 
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
@@ -13,22 +18,28 @@ mod mqtt;
 mod ui;
 
 use alloc::string::String;
+use alloc::format;
 use core::fmt::Write;
 use num_traits::*;
 
 use events::{CcrEvent, EventQueue};
-use ui::UiState;
+use ui::{UiState, ViewMode};
 
-// Xous imports (conditional compilation for hosted vs hardware)
-#[cfg(target_os = "xous")]
+// Xous imports
 use blitstr2::GlyphStyle;
-#[cfg(target_os = "xous")]
 use ux_api::minigfx::*;
-#[cfg(target_os = "xous")]
 use ux_api::service::api::Gid;
 
 /// Server name for xous-names registration
 pub const SERVER_NAME_CCR: &str = "_Claude Code Remote_";
+
+/// MQTT broker address (Docker host from container)
+pub const MQTT_BROKER: &str = "172.17.0.1:1883";
+
+/// MQTT topics
+pub const TOPIC_EVENTS: &str = "ccr/events";
+pub const TOPIC_PERM_REQUEST: &str = "ccr/permissions/request";
+pub const TOPIC_PERM_RESPONSE: &str = "ccr/permissions/response";
 
 /// Message opcodes
 #[derive(Debug, num_derive::FromPrimitive, num_derive::ToPrimitive)]
@@ -55,24 +66,23 @@ struct CcrApp {
     ui: UiState,
     /// Server ID
     sid: xous::SID,
-
-    // Xous-specific fields
-    #[cfg(target_os = "xous")]
+    /// GAM connection
     gam: gam::Gam,
-    #[cfg(target_os = "xous")]
+    /// GAM token
     _gam_token: [u32; 4],
-    #[cfg(target_os = "xous")]
+    /// Content canvas
     content: Gid,
-    #[cfg(target_os = "xous")]
+    /// Screen size
     screensize: Point,
 }
 
 impl CcrApp {
     /// Create new CCR application
-    #[cfg(target_os = "xous")]
     fn new(xns: &xous_names::XousNames, sid: xous::SID) -> Self {
+        log::info!("CCR: Connecting to GAM...");
         let gam = gam::Gam::new(xns).expect("Can't connect to GAM");
 
+        log::info!("CCR: Registering UX context as '{}'...", gam::APP_NAME_CCR);
         let gam_token = gam
             .register_ux(gam::UxRegistration {
                 app_name: String::from(gam::APP_NAME_CCR),
@@ -87,9 +97,11 @@ impl CcrApp {
             })
             .expect("Could not register GAM UX")
             .unwrap();
+        log::info!("CCR: UX registered successfully, token: {:x?}", gam_token);
 
         let content = gam.request_content_canvas(gam_token).expect("Could not get content canvas");
         let screensize = gam.get_canvas_bounds(content).expect("Could not get canvas dimensions");
+        log::info!("CCR: Canvas acquired, size: {}x{}", screensize.x, screensize.y);
 
         Self {
             events: EventQueue::new(),
@@ -102,22 +114,62 @@ impl CcrApp {
         }
     }
 
-    /// Create new CCR application (non-Xous, for testing)
-    #[cfg(not(target_os = "xous"))]
-    fn new(xns: &xous_names::XousNames, sid: xous::SID) -> Self {
-        Self {
-            events: EventQueue::new(),
-            ui: UiState::new(),
-            sid,
+    /// Handle incoming MQTT message
+    fn handle_mqtt_message(&mut self, topic: &str, payload: &str) {
+        log::debug!("CCR: MQTT {} -> {}", topic, &payload[..payload.len().min(50)]);
+
+        let event = if topic == TOPIC_EVENTS {
+            CcrEvent::from_json(payload)
+        } else if topic == TOPIC_PERM_REQUEST {
+            CcrEvent::from_permission_request(payload)
+        } else {
+            None
+        };
+
+        if let Some(event) = event {
+            self.handle_event(event);
         }
     }
 
     /// Handle incoming event
     fn handle_event(&mut self, event: CcrEvent) {
-        // Update stats if this is a stats event
-        if let CcrEvent::Stats { tokens, cost_cents } = &event {
-            self.ui.tokens = *tokens;
-            self.ui.cost_cents = *cost_cents;
+        // Extract session ID from event
+        match &event {
+            CcrEvent::SessionStart { session_id, .. } |
+            CcrEvent::SessionEnd { session_id, .. } |
+            CcrEvent::Stop { session_id } |
+            CcrEvent::UserInput { session_id, .. } |
+            CcrEvent::ToolCall { session_id, .. } |
+            CcrEvent::ToolResult { session_id, .. } |
+            CcrEvent::PermissionPending { session_id, .. } |
+            CcrEvent::PermissionResolved { session_id, .. } |
+            CcrEvent::PermissionTimeout { session_id, .. } |
+            CcrEvent::Notification { session_id, .. } => {
+                if !session_id.is_empty() {
+                    self.ui.session_id = session_id.clone();
+                }
+            }
+            CcrEvent::Status { connected, .. } => {
+                self.ui.connected = *connected;
+            }
+        }
+
+        // Handle permission events specially
+        if let CcrEvent::PermissionPending { request_id, .. } = &event {
+            self.ui.set_pending_permission(request_id);
+            // Auto-switch to permission view
+            self.ui.view = ViewMode::Permission;
+        }
+
+        // Clear pending permission if resolved/timeout
+        if let CcrEvent::PermissionResolved { request_id, .. } |
+               CcrEvent::PermissionTimeout { request_id, .. } = &event {
+            if self.ui.pending_permission.as_deref() == Some(request_id) {
+                self.ui.clear_pending_permission();
+                if self.ui.view == ViewMode::Permission {
+                    self.ui.view = ViewMode::List;
+                }
+            }
         }
 
         // Add to queue
@@ -125,64 +177,138 @@ impl CcrApp {
 
         // Auto-scroll to show new event
         self.ui.auto_scroll(self.events.len());
-
-        // Check for permission requests
-        self.ui.select_next_permission(&self.events);
     }
 
     /// Handle key press
     fn handle_key(&mut self, key: char) {
+        log::debug!("CCR: Key {:?} (0x{:04x})", key, key as u32);
+
+        match self.ui.view {
+            ViewMode::Permission => self.handle_key_permission(key),
+            ViewMode::Detail => self.handle_key_detail(key),
+            ViewMode::List => self.handle_key_list(key),
+        }
+    }
+
+    /// Handle key in list view
+    fn handle_key_list(&mut self, key: char) {
         match key {
-            // Up arrow (Unicode arrow or F1 key code)
+            // Up arrow
             '↑' | '\u{0011}' | 'k' => {
                 self.ui.scroll_up();
             }
-            // Down arrow (Unicode arrow or F2 key code)
+            // Down arrow
             '↓' | '\u{0012}' | 'j' => {
                 self.ui.scroll_down(self.events.len());
             }
-            // Left arrow - deny (Unicode arrow or F3 key code)
-            '←' | '\u{0013}' | 'h' => {
-                if let Some(idx) = self.ui.selected {
-                    self.handle_permission_response(idx, false);
-                }
-            }
-            // Right arrow - approve (Unicode arrow or F4 key code)
+            // Right arrow - view detail
             '→' | '\u{0014}' | 'l' => {
-                if let Some(idx) = self.ui.selected {
-                    self.handle_permission_response(idx, true);
+                if self.events.len() > 0 {
+                    self.ui.view = ViewMode::Detail;
                 }
             }
-            // Enter - toggle expand (future)
+            // Left arrow - go to permission if pending
+            '←' | '\u{0013}' | 'h' => {
+                if self.ui.has_pending_permission() {
+                    self.ui.view = ViewMode::Permission;
+                }
+            }
+            // Enter - view detail
             '\r' | '\n' => {
-                // TODO: expand/collapse event details
+                if self.events.len() > 0 {
+                    self.ui.view = ViewMode::Detail;
+                }
+            }
+            // Home/center button - toggle permission view
+            '∴' => {
+                if self.ui.has_pending_permission() {
+                    self.ui.view = ViewMode::Permission;
+                }
             }
             _ => {}
         }
     }
 
-    /// Handle permission approval/denial
-    fn handle_permission_response(&mut self, _idx: usize, approved: bool) {
-        if let Some(idx) = self.ui.selected {
-            if let Some(event) = self.events.get(idx) {
-                if let CcrEvent::PermissionRequest { id, .. } = event {
-                    let response = alloc::format!(
-                        r#"{{"type":"response","id":"{}","approved":{}}}"#,
-                        id,
-                        approved
-                    );
-                    log::info!("CCR: Permission response: {}", response);
-                    // TODO: Send via MQTT
-                }
+    /// Handle key in detail view
+    fn handle_key_detail(&mut self, key: char) {
+        match key {
+            // Up arrow - previous event
+            '↑' | '\u{0011}' | 'k' => {
+                self.ui.scroll_up();
             }
+            // Down arrow - next event
+            '↓' | '\u{0012}' | 'j' => {
+                self.ui.scroll_down(self.events.len());
+            }
+            // Left arrow - back to list
+            '←' | '\u{0013}' | 'h' | '\x1b' => {
+                self.ui.view = ViewMode::List;
+            }
+            // Enter - back to list
+            '\r' | '\n' => {
+                self.ui.view = ViewMode::List;
+            }
+            _ => {}
         }
-        // Clear selection and find next permission
-        self.ui.selected = None;
-        self.ui.select_next_permission(&self.events);
+    }
+
+    /// Handle key in permission view
+    fn handle_key_permission(&mut self, key: char) {
+        match key {
+            // Left/Right - toggle choice
+            '←' | '\u{0013}' | 'h' => {
+                self.ui.permission_choice = true; // Allow
+            }
+            '→' | '\u{0014}' | 'l' => {
+                self.ui.permission_choice = false; // Deny
+            }
+            // Enter - confirm choice
+            '\r' | '\n' | '∴' => {
+                self.send_permission_response();
+            }
+            // Escape - cancel (back to list)
+            '\x1b' => {
+                self.ui.view = ViewMode::List;
+            }
+            // Up - back to list
+            '↑' | '\u{0011}' | 'k' => {
+                self.ui.view = ViewMode::List;
+            }
+            _ => {}
+        }
+    }
+
+    /// Send permission response via MQTT
+    fn send_permission_response(&mut self) {
+        if let Some(request_id) = &self.ui.pending_permission {
+            let decision = if self.ui.permission_choice { "allow" } else { "deny" };
+
+            let payload = format!(
+                r#"{{"request_id":"{}","decision":"{}"}}"#,
+                request_id,
+                decision
+            );
+
+            log::info!("CCR: Sending permission response: {}", payload);
+
+            // TODO: Actually send via MQTT
+            // mqtt_publish(TOPIC_PERM_RESPONSE, payload.as_bytes());
+
+            // Add resolved event to queue
+            self.events.push(CcrEvent::PermissionResolved {
+                request_id: request_id.clone(),
+                decision: String::from(decision),
+                session_id: self.ui.session_id.clone(),
+            });
+
+            // Clear pending and return to list
+            self.ui.clear_pending_permission();
+            self.ui.view = ViewMode::List;
+            self.ui.auto_scroll(self.events.len());
+        }
     }
 
     /// Clear screen area
-    #[cfg(target_os = "xous")]
     fn clear_area(&self) {
         self.gam
             .draw_rectangle(
@@ -201,22 +327,57 @@ impl CcrApp {
     }
 
     /// Redraw the UI
-    #[cfg(target_os = "xous")]
     fn redraw(&mut self) {
         self.clear_area();
 
-        // Render content
-        let status = ui::render_status_bar(&self.ui);
-        let event_list = ui::render_event_list(&self.events, &self.ui);
-        let footer = ui::render_footer(&self.ui);
+        // Render content based on view
+        let content = match self.ui.view {
+            ViewMode::List => {
+                let header = ui::render_header(&self.ui);
+                let list = ui::render_event_list(&self.events, &self.ui);
+                let footer = ui::render_footer(&self.ui);
 
-        // Combine into single text
-        let mut content = String::new();
-        writeln!(content, "{}", status).ok();
-        writeln!(content, "────────────────────────────────────").ok();
-        write!(content, "{}", event_list).ok();
-        writeln!(content, "────────────────────────────────────").ok();
-        write!(content, "{}", footer).ok();
+                let mut output = String::new();
+                writeln!(output, "{}", header).ok();
+                writeln!(output, "──────────────────────────────────────────").ok();
+                write!(output, "{}", list).ok();
+                writeln!(output, "──────────────────────────────────────────").ok();
+                write!(output, "{}", footer).ok();
+                output
+            }
+            ViewMode::Detail => {
+                let header = ui::render_header(&self.ui);
+                let detail = if let Some(event) = self.events.get(self.ui.selected) {
+                    ui::render_event_detail(event)
+                } else {
+                    String::from("  No event selected")
+                };
+                let footer = ui::render_footer(&self.ui);
+
+                let mut output = String::new();
+                writeln!(output, "{}", header).ok();
+                writeln!(output, "──────────────────────────────────────────").ok();
+                write!(output, "{}", detail).ok();
+                writeln!(output).ok();
+                writeln!(output, "──────────────────────────────────────────").ok();
+                write!(output, "{}", footer).ok();
+                output
+            }
+            ViewMode::Permission => {
+                // Find the pending permission event
+                let perm_event = self.ui.pending_permission.as_ref().and_then(|req_id| {
+                    self.events.iter().find(|e| e.request_id() == Some(req_id))
+                });
+
+                if let Some(event) = perm_event {
+                    ui::render_permission_dialog(event, self.ui.permission_choice)
+                } else {
+                    // No permission found, go back to list
+                    self.ui.view = ViewMode::List;
+                    String::from("  No pending permission")
+                }
+            }
+        };
 
         // Create text view
         let mut text_view = TextView::new(
@@ -238,19 +399,50 @@ impl CcrApp {
         self.gam.redraw().expect("Could not redraw screen");
     }
 
-    /// Redraw (non-Xous, for testing)
-    #[cfg(not(target_os = "xous"))]
-    fn redraw(&mut self) {
-        let status = ui::render_status_bar(&self.ui);
-        let event_list = ui::render_event_list(&self.events, &self.ui);
-        let footer = ui::render_footer(&self.ui);
+    /// Add demo events for testing
+    fn add_demo_events(&mut self) {
+        self.handle_event(CcrEvent::Status {
+            connected: true,
+            message: String::from("Demo mode - no MQTT"),
+        });
 
-        println!("\x1B[2J\x1B[H"); // Clear screen
-        println!("{}", status);
-        println!("────────────────────────────────────────");
-        print!("{}", event_list);
-        println!("────────────────────────────────────────");
-        println!("{}", footer);
+        self.handle_event(CcrEvent::SessionStart {
+            session_id: String::from("demo-session-123"),
+            source: String::from("startup"),
+            model: String::from("claude-opus-4"),
+        });
+
+        self.handle_event(CcrEvent::UserInput {
+            text: String::from("Fix the bug in main.rs that causes the crash"),
+            session_id: String::from("demo-session-123"),
+        });
+
+        self.handle_event(CcrEvent::ToolCall {
+            id: String::from("t1"),
+            tool: String::from("Read"),
+            args: String::from("/home/user/project/src/main.rs"),
+            session_id: String::from("demo-session-123"),
+        });
+
+        self.handle_event(CcrEvent::ToolResult {
+            id: String::from("t1"),
+            output: String::from("fn main() { let x = None; x.unwrap(); }"),
+            session_id: String::from("demo-session-123"),
+        });
+
+        self.handle_event(CcrEvent::ToolCall {
+            id: String::from("t2"),
+            tool: String::from("Bash"),
+            args: String::from("cargo build"),
+            session_id: String::from("demo-session-123"),
+        });
+
+        self.handle_event(CcrEvent::PermissionPending {
+            request_id: String::from("p1"),
+            tool: String::from("Bash"),
+            command: String::from("rm -rf target/ && cargo build --release"),
+            session_id: String::from("demo-session-123"),
+        });
     }
 }
 
@@ -265,36 +457,8 @@ fn main() -> ! {
 
     let mut app = CcrApp::new(&xns, sid);
 
-    // Add some demo events for testing
-    app.handle_event(CcrEvent::Status {
-        connected: true,
-        message: String::from("Ready"),
-    });
-    app.handle_event(CcrEvent::UserInput {
-        text: String::from("Fix the bug in main.rs"),
-    });
-    app.handle_event(CcrEvent::ToolCall {
-        id: String::from("t1"),
-        tool: String::from("Read"),
-        args: String::from("src/main.rs"),
-    });
-    app.handle_event(CcrEvent::ToolResult {
-        id: String::from("t1"),
-        output: String::from("fn main() { ... }"),
-        truncated: true,
-    });
-    app.handle_event(CcrEvent::PermissionRequest {
-        id: String::from("p1"),
-        tool: String::from("Bash"),
-        command: String::from("cargo build --release"),
-        timeout_secs: 30,
-    });
-    app.handle_event(CcrEvent::Stats {
-        tokens: 1234,
-        cost_cents: 2,
-    });
-
     log::info!("CCR: Entering main loop");
+    log::info!("CCR: Subscribe to {} and {}", TOPIC_EVENTS, TOPIC_PERM_REQUEST);
 
     loop {
         let msg = xous::receive_message(sid).unwrap();
@@ -309,14 +473,11 @@ fn main() -> ! {
                 // TODO: Extract key from message
             }
             Some(CcrOp::RawKey) => {
-                log::debug!("CCR: RawKey");
                 // Extract raw keys from scalar message
                 if let xous::Message::Scalar(scalar) = msg.body {
-                    // Keys are sent as 4 chars in arg1-arg4
                     for &key_val in &[scalar.arg1, scalar.arg2, scalar.arg3, scalar.arg4] {
                         if key_val != 0 {
                             if let Some(c) = char::from_u32(key_val as u32) {
-                                log::debug!("CCR: Key pressed: {:?} (0x{:04x})", c, key_val);
                                 app.handle_key(c);
                                 app.redraw();
                             }
