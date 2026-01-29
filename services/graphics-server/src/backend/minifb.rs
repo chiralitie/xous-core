@@ -354,7 +354,10 @@ impl MinifbThread {
             // This may block to regulate the update rate.
             window.update_with_buffer(&native_buffer, WIDTH as usize, HEIGHT as usize).unwrap();
             if !window.is_open() || window.is_key_down(Key::Escape) {
-                std::process::exit(0);
+                // Properly shutdown the entire Xous system instead of just exiting this process
+                log::info!("GFX|hosted: Window closed, initiating system shutdown");
+                xous::rsyscall(xous::SysCall::Shutdown).ok();
+                std::process::exit(0);  // Fallback if shutdown fails
             }
         }
     }
