@@ -30,11 +30,23 @@ use blitstr2::GlyphStyle;
 use ux_api::minigfx::*;
 use ux_api::service::api::Gid;
 
+// Networking imports (hosted mode uses std)
+#[cfg(feature = "hosted")]
+use std::net::TcpStream;
+#[cfg(feature = "hosted")]
+use std::io::{Read, Write as IoWrite};
+#[cfg(feature = "hosted")]
+use std::time::Duration;
+#[cfg(feature = "hosted")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "hosted")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// Server name for xous-names registration
 pub const SERVER_NAME_CCR: &str = "_Claude Code Remote_";
 
-/// MQTT broker address (Docker host from container)
-pub const MQTT_BROKER: &str = "172.17.0.1:1883";
+/// MQTT broker address (localhost for hosted mode)
+pub const MQTT_BROKER: &str = "127.0.0.1:1883";
 
 /// MQTT topics
 pub const TOPIC_EVENTS: &str = "ccr/events";
@@ -50,12 +62,40 @@ pub enum CcrOp {
     KeyPress,
     /// Raw key event
     RawKey,
-    /// MQTT message received
+    /// MQTT message received (scalar: connection status, or memory: topic+payload)
     MqttMessage,
     /// Timer tick (for MQTT polling)
     Tick,
     /// Quit the application
     Quit,
+}
+
+/// MQTT connection state for thread communication
+#[cfg(feature = "hosted")]
+struct MqttThreadState {
+    stream: Option<TcpStream>,
+    connected: bool,
+    packet_id: u16,
+}
+
+#[cfg(feature = "hosted")]
+impl MqttThreadState {
+    fn new() -> Self {
+        Self {
+            stream: None,
+            connected: false,
+            packet_id: 1,
+        }
+    }
+
+    fn next_packet_id(&mut self) -> u16 {
+        let id = self.packet_id;
+        self.packet_id = self.packet_id.wrapping_add(1);
+        if self.packet_id == 0 {
+            self.packet_id = 1;
+        }
+        id
+    }
 }
 
 /// Application state
@@ -74,6 +114,15 @@ struct CcrApp {
     content: Gid,
     /// Screen size
     screensize: Point,
+    /// Connection to self for MQTT thread messages
+    #[cfg(feature = "hosted")]
+    self_cid: xous::CID,
+    /// MQTT thread running flag
+    #[cfg(feature = "hosted")]
+    mqtt_running: Arc<AtomicBool>,
+    /// MQTT thread state
+    #[cfg(feature = "hosted")]
+    mqtt_state: Arc<Mutex<MqttThreadState>>,
 }
 
 impl CcrApp {
@@ -103,6 +152,27 @@ impl CcrApp {
         let screensize = gam.get_canvas_bounds(content).expect("Could not get canvas dimensions");
         log::info!("CCR: Canvas acquired, size: {}x{}", screensize.x, screensize.y);
 
+        // Initialize MQTT thread (hosted mode only)
+        #[cfg(feature = "hosted")]
+        let self_cid = xous::connect(sid).expect("Can't connect to self");
+
+        #[cfg(feature = "hosted")]
+        let mqtt_running = Arc::new(AtomicBool::new(true));
+
+        #[cfg(feature = "hosted")]
+        let mqtt_state = Arc::new(Mutex::new(MqttThreadState::new()));
+
+        // Start MQTT thread
+        #[cfg(feature = "hosted")]
+        {
+            let running = mqtt_running.clone();
+            let state = mqtt_state.clone();
+            let cid = self_cid;
+            std::thread::spawn(move || {
+                mqtt_thread_main(MQTT_BROKER, running, state, cid);
+            });
+        }
+
         Self {
             events: EventQueue::new(),
             ui: UiState::new(),
@@ -111,6 +181,12 @@ impl CcrApp {
             _gam_token: gam_token,
             content,
             screensize,
+            #[cfg(feature = "hosted")]
+            self_cid,
+            #[cfg(feature = "hosted")]
+            mqtt_running,
+            #[cfg(feature = "hosted")]
+            mqtt_state,
         }
     }
 
@@ -446,6 +522,175 @@ impl CcrApp {
     }
 }
 
+/// MQTT background thread (hosted mode only)
+#[cfg(feature = "hosted")]
+fn mqtt_thread_main(
+    broker: &str,
+    running: Arc<AtomicBool>,
+    state: Arc<Mutex<MqttThreadState>>,
+    main_cid: xous::CID,
+) {
+    log::info!("CCR MQTT: Thread started, connecting to {}", broker);
+
+    while running.load(Ordering::SeqCst) {
+        // Try to connect
+        match TcpStream::connect(broker) {
+            Ok(mut stream) => {
+                log::info!("CCR MQTT: TCP connected to {}", broker);
+
+                // Set timeouts
+                stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
+                stream.set_write_timeout(Some(Duration::from_millis(5000))).ok();
+
+                // Send CONNECT packet
+                let connect_packet = mqtt::build_connect_packet("ccr-precursor");
+                if let Err(e) = stream.write_all(&connect_packet) {
+                    log::error!("CCR MQTT: Failed to send CONNECT: {:?}", e);
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+                stream.flush().ok();
+
+                // Wait for CONNACK
+                let mut connack_buf = [0u8; 4];
+                match stream.read_exact(&mut connack_buf) {
+                    Ok(_) => {
+                        if mqtt::is_connack_success(&connack_buf) {
+                            log::info!("CCR MQTT: CONNACK received, connected!");
+                        } else {
+                            log::error!("CCR MQTT: CONNACK rejected");
+                            std::thread::sleep(Duration::from_secs(5));
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("CCR MQTT: Failed to read CONNACK: {:?}", e);
+                        std::thread::sleep(Duration::from_secs(5));
+                        continue;
+                    }
+                }
+
+                // Subscribe to topics
+                {
+                    let mut st = state.lock().unwrap();
+                    let packet_id = st.next_packet_id();
+                    let sub_packet = mqtt::build_subscribe_packet(packet_id, TOPIC_EVENTS);
+                    if let Err(e) = stream.write_all(&sub_packet) {
+                        log::error!("CCR MQTT: Failed to send SUBSCRIBE: {:?}", e);
+                        continue;
+                    }
+                    stream.flush().ok();
+                    log::info!("CCR MQTT: Subscribed to {}", TOPIC_EVENTS);
+                }
+
+                // Update state and notify main thread
+                {
+                    let mut st = state.lock().unwrap();
+                    st.stream = Some(stream.try_clone().expect("Failed to clone stream"));
+                    st.connected = true;
+                }
+                notify_main_connected(main_cid, true);
+
+                // Poll loop
+                let mut read_buf = [0u8; 2048];
+                let mut last_ping = std::time::Instant::now();
+                let ping_interval = Duration::from_secs(30);
+
+                while running.load(Ordering::SeqCst) {
+                    // Try to read data
+                    match stream.read(&mut read_buf) {
+                        Ok(0) => {
+                            log::info!("CCR MQTT: Connection closed by broker");
+                            break;
+                        }
+                        Ok(n) => {
+                            // Parse and handle packets
+                            let data = &read_buf[..n];
+                            if let Some((topic, payload)) = mqtt::parse_publish_packet(data) {
+                                let payload_str = String::from_utf8_lossy(&payload);
+                                send_mqtt_message_to_main(main_cid, &topic, &payload_str);
+                            } else if mqtt::is_pingresp(data) {
+                                log::debug!("CCR MQTT: PINGRESP received");
+                            } else if mqtt::is_suback(data) {
+                                log::debug!("CCR MQTT: SUBACK received");
+                            }
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // No data available, continue
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                            // Timeout, continue
+                        }
+                        Err(e) => {
+                            log::error!("CCR MQTT: Read error: {:?}", e);
+                            break;
+                        }
+                    }
+
+                    // Send ping if needed
+                    if last_ping.elapsed() > ping_interval {
+                        let ping_packet = mqtt::build_pingreq_packet();
+                        if let Err(e) = stream.write_all(&ping_packet) {
+                            log::error!("CCR MQTT: Failed to send PINGREQ: {:?}", e);
+                            break;
+                        }
+                        stream.flush().ok();
+                        last_ping = std::time::Instant::now();
+                        log::debug!("CCR MQTT: PINGREQ sent");
+                    }
+
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+
+                // Disconnected
+                {
+                    let mut st = state.lock().unwrap();
+                    st.stream = None;
+                    st.connected = false;
+                }
+                notify_main_connected(main_cid, false);
+                log::info!("CCR MQTT: Disconnected, will retry in 5s");
+            }
+            Err(e) => {
+                log::warn!("CCR MQTT: Connection failed: {:?}", e);
+            }
+        }
+
+        // Wait before retry
+        if running.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    }
+
+    log::info!("CCR MQTT: Thread exiting");
+}
+
+/// Notify main thread of connection status change
+#[cfg(feature = "hosted")]
+fn notify_main_connected(main_cid: xous::CID, connected: bool) {
+    let _ = xous::try_send_message(
+        main_cid,
+        xous::Message::new_scalar(
+            CcrOp::MqttMessage.to_usize().unwrap(),
+            if connected { 1 } else { 0 },
+            0, 0, 0,
+        ),
+    );
+}
+
+/// Send MQTT message to main thread
+#[cfg(feature = "hosted")]
+fn send_mqtt_message_to_main(main_cid: xous::CID, topic: &str, payload: &str) {
+    // Format: "topic\0payload"
+    let mut data = String::from(topic);
+    data.push('\0');
+    data.push_str(payload);
+
+    if let Ok(buf) = xous_ipc::Buffer::into_buf(data) {
+        let _ = buf.send(main_cid, CcrOp::MqttMessage.to_u32().unwrap());
+    }
+}
+
 /// Main entry point
 fn main() -> ! {
     log_server::init_wait().unwrap();
@@ -486,11 +731,39 @@ fn main() -> ! {
                 }
             }
             Some(CcrOp::MqttMessage) => {
-                log::debug!("CCR: MQTT message");
-                // TODO: Parse and handle MQTT message
+                match &msg.body {
+                    xous::Message::Scalar(scalar) => {
+                        // Connection status change (arg1: 1=connected, 0=disconnected)
+                        let connected = scalar.arg1 != 0;
+                        log::info!("CCR: MQTT connection status: {}", if connected { "connected" } else { "disconnected" });
+                        app.handle_event(CcrEvent::Status {
+                            connected,
+                            message: if connected {
+                                String::from("Connected to MQTT broker")
+                            } else {
+                                String::from("Disconnected from MQTT broker")
+                            },
+                        });
+                        app.redraw();
+                    }
+                    xous::Message::Move(mem) => {
+                        // MQTT message with topic and payload
+                        let buf = unsafe { xous_ipc::Buffer::from_memory_message(mem) };
+                        if let Ok(data) = buf.to_original::<String, _>() {
+                            if let Some((topic, payload)) = data.split_once('\0') {
+                                log::info!("CCR: MQTT message on {}: {} bytes", topic, payload.len());
+                                app.handle_mqtt_message(topic, payload);
+                                app.redraw();
+                            }
+                        }
+                    }
+                    _ => {
+                        log::debug!("CCR: Unknown MQTT message type");
+                    }
+                }
             }
             Some(CcrOp::Tick) => {
-                // TODO: Poll MQTT, send ping if needed
+                // Tick is handled by MQTT thread in hosted mode
             }
             Some(CcrOp::Quit) => {
                 log::info!("CCR: Quitting");
