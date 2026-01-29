@@ -76,19 +76,23 @@ pub fn build_subscribe_packet(packet_id: u16, topic: &str) -> Vec<u8> {
     packet
 }
 
-/// Build MQTT PUBLISH packet
-pub fn build_publish_packet(topic: &str, payload: &[u8]) -> Vec<u8> {
+/// Build MQTT PUBLISH packet with QoS 1
+pub fn build_publish_packet(topic: &str, payload: &[u8], packet_id: u16) -> Vec<u8> {
     let mut packet = Vec::new();
 
-    // Variable header (topic)
+    // Variable header (topic + packet ID for QoS 1)
     let mut var_header = Vec::new();
     var_header.push((topic.len() >> 8) as u8);
     var_header.push((topic.len() & 0xFF) as u8);
     var_header.extend_from_slice(topic.as_bytes());
 
-    // Fixed header
+    // Packet ID (for QoS 1)
+    var_header.push((packet_id >> 8) as u8);
+    var_header.push((packet_id & 0xFF) as u8);
+
+    // Fixed header (PUBLISH with QoS 1)
     let remaining_len = var_header.len() + payload.len();
-    packet.push(PUBLISH << 4);
+    packet.push((PUBLISH << 4) | 0x02);  // QoS 1
     encode_remaining_length(&mut packet, remaining_len);
 
     packet.extend(var_header);

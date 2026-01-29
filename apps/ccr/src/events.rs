@@ -162,15 +162,22 @@ impl CcrEvent {
     }
 
     /// Parse permission request from ccr/permissions/request topic
+    /// Accepts messages with or without "type" field
     pub fn from_permission_request(text: &str) -> Option<Self> {
-        let event_type = Self::get_json_string(text, "type")?;
-        if event_type != "permission_request" {
-            return None;
+        // Check if type field exists and matches (optional)
+        if let Some(event_type) = Self::get_json_string(text, "type") {
+            if event_type != "permission_request" {
+                return None;
+            }
         }
 
+        // Must have at least request_id and tool
+        let request_id = Self::get_json_string(text, "request_id")?;
+        let tool = Self::get_json_string(text, "tool")?;
+
         Some(CcrEvent::PermissionPending {
-            request_id: Self::get_json_string(text, "request_id").unwrap_or_default(),
-            tool: Self::get_json_string(text, "tool").unwrap_or_default(),
+            request_id,
+            tool,
             command: Self::get_json_string(text, "command").unwrap_or_default(),
             session_id: Self::get_json_string(text, "session_id").unwrap_or_default(),
         })

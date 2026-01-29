@@ -954,6 +954,7 @@ version = "0.1.0"
 dependencies = [
  "blitstr2",
  "gam",
+ "ime-plugin-shell",
  "log",
  "num-derive 0.4.2",
  "num-traits",

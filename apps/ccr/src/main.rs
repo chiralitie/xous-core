@@ -15,7 +15,7 @@ extern crate alloc;
 
 mod events;
 mod mqtt;
-mod ui;
+mod ui_improved;
 
 use alloc::string::String;
 use alloc::format;
@@ -23,7 +23,16 @@ use core::fmt::Write;
 use num_traits::*;
 
 use events::{CcrEvent, EventQueue};
-use ui::{UiState, ViewMode};
+use ui_improved::{UiState, ViewMode};
+
+/// Truncate string for display
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        s
+    } else {
+        &s[..max_len]
+    }
+}
 
 // Xous imports
 use blitstr2::GlyphStyle;
@@ -58,9 +67,9 @@ pub const TOPIC_PERM_RESPONSE: &str = "ccr/permissions/response";
 pub enum CcrOp {
     /// Redraw the UI
     Redraw = 0,
-    /// Handle keyboard input
-    KeyPress,
-    /// Raw key event
+    /// A line of text has arrived from IME
+    Line,
+    /// Raw key event (for d-pad navigation)
     RawKey,
     /// MQTT message received (scalar: connection status, or memory: topic+payload)
     MqttMessage,
@@ -98,6 +107,12 @@ impl MqttThreadState {
     }
 }
 
+/// Layout constants
+const MARGIN_X: isize = 8;
+const MARGIN_Y: isize = 4;
+const BUBBLE_SPACE: isize = 2;
+const BUBBLE_RADIUS: u16 = 4;
+
 /// Application state
 struct CcrApp {
     /// Event queue
@@ -114,6 +129,10 @@ struct CcrApp {
     content: Gid,
     /// Screen size
     screensize: Point,
+    /// Bubble width (80% of screen)
+    bubble_width: u16,
+    /// Bubble margin
+    bubble_margin: Point,
     /// Connection to self for MQTT thread messages
     #[cfg(feature = "hosted")]
     self_cid: xous::CID,
@@ -136,10 +155,10 @@ impl CcrApp {
             .register_ux(gam::UxRegistration {
                 app_name: String::from(gam::APP_NAME_CCR),
                 ux_type: gam::UxType::Chat,
-                predictor: None,
+                predictor: Some(String::from(ime_plugin_shell::SERVER_NAME_IME_PLUGIN_SHELL)),
                 listener: sid.to_array(),
                 redraw_id: CcrOp::Redraw.to_u32().unwrap(),
-                gotinput_id: Some(CcrOp::KeyPress.to_u32().unwrap()),
+                gotinput_id: Some(CcrOp::Line.to_u32().unwrap()),
                 audioframe_id: None,
                 rawkeys_id: Some(CcrOp::RawKey.to_u32().unwrap()),
                 focuschange_id: None,
@@ -151,6 +170,10 @@ impl CcrApp {
         let content = gam.request_content_canvas(gam_token).expect("Could not get content canvas");
         let screensize = gam.get_canvas_bounds(content).expect("Could not get canvas dimensions");
         log::info!("CCR: Canvas acquired, size: {}x{}", screensize.x, screensize.y);
+
+        // Calculate bubble dimensions (80% width)
+        let bubble_width = ((screensize.x * 4) / 5) as u16;
+        let bubble_margin = Point::new(4, 2);
 
         // Initialize MQTT thread (hosted mode only)
         #[cfg(feature = "hosted")]
@@ -181,6 +204,8 @@ impl CcrApp {
             _gam_token: gam_token,
             content,
             screensize,
+            bubble_width,
+            bubble_margin,
             #[cfg(feature = "hosted")]
             self_cid,
             #[cfg(feature = "hosted")]
@@ -233,8 +258,7 @@ impl CcrApp {
         // Handle permission events specially
         if let CcrEvent::PermissionPending { request_id, .. } = &event {
             self.ui.set_pending_permission(request_id);
-            // Auto-switch to permission view
-            self.ui.view = ViewMode::Permission;
+            // Permission shown inline in Chat view, no view switch needed
         }
 
         // Clear pending permission if resolved/timeout
@@ -242,9 +266,6 @@ impl CcrApp {
                CcrEvent::PermissionTimeout { request_id, .. } = &event {
             if self.ui.pending_permission.as_deref() == Some(request_id) {
                 self.ui.clear_pending_permission();
-                if self.ui.view == ViewMode::Permission {
-                    self.ui.view = ViewMode::List;
-                }
             }
         }
 
@@ -255,103 +276,119 @@ impl CcrApp {
         self.ui.auto_scroll(self.events.len());
     }
 
-    /// Handle key press
-    fn handle_key(&mut self, key: char) {
-        log::debug!("CCR: Key {:?} (0x{:04x})", key, key as u32);
-
-        match self.ui.view {
-            ViewMode::Permission => self.handle_key_permission(key),
-            ViewMode::Detail => self.handle_key_detail(key),
-            ViewMode::List => self.handle_key_list(key),
-        }
-    }
-
-    /// Handle key in list view
-    fn handle_key_list(&mut self, key: char) {
+    /// Handle raw key event for d-pad navigation
+    fn handle_rawkey(&mut self, key: char) {
+        // D-pad navigation:
+        // Up (↑ U+2191): move selection up (visually up = higher index = newer event)
+        // Down (↓ U+2193): move selection down (visually down = lower index = older event)
+        // Right (→ U+2192): expand selected bubble (detail view)
+        // Left (← U+2190): collapse/clear selection
         match key {
-            // Up arrow
-            '↑' | '\u{0011}' | 'k' => {
-                self.ui.scroll_up();
+            '↑' | '\u{2191}' => {
+                // Move selection up (visually) = to older event = lower index
+                if self.ui.selected > 0 {
+                    self.ui.selected -= 1;
+                }
             }
-            // Down arrow
-            '↓' | '\u{0012}' | 'j' => {
-                self.ui.scroll_down(self.events.len());
+            '↓' | '\u{2193}' => {
+                // Move selection down (visually) = to newer event = higher index
+                if self.ui.selected < self.events.len().saturating_sub(1) {
+                    self.ui.selected += 1;
+                }
             }
-            // Right arrow - view detail
-            '→' | '\u{0014}' | 'l' => {
-                if self.events.len() > 0 {
+            '→' | '\u{2192}' => {
+                // Expand: switch to detail view
+                if self.ui.has_selection() && !self.events.is_empty() {
                     self.ui.view = ViewMode::Detail;
                 }
             }
-            // Left arrow - go to permission if pending
-            '←' | '\u{0013}' | 'h' => {
-                if self.ui.has_pending_permission() {
-                    self.ui.view = ViewMode::Permission;
-                }
-            }
-            // Enter - view detail
-            '\r' | '\n' => {
-                if self.events.len() > 0 {
-                    self.ui.view = ViewMode::Detail;
-                }
-            }
-            // Home/center button - toggle permission view
-            '∴' => {
-                if self.ui.has_pending_permission() {
-                    self.ui.view = ViewMode::Permission;
+            '←' | '\u{2190}' => {
+                // Collapse: if in detail view, go back to chat
+                // If in chat view, clear selection
+                if self.ui.view == ViewMode::Detail {
+                    self.ui.view = ViewMode::Chat;
+                } else {
+                    self.ui.clear_selection();
                 }
             }
             _ => {}
         }
     }
 
-    /// Handle key in detail view
-    fn handle_key_detail(&mut self, key: char) {
-        match key {
-            // Up arrow - previous event
-            '↑' | '\u{0011}' | 'k' => {
-                self.ui.scroll_up();
-            }
-            // Down arrow - next event
-            '↓' | '\u{0012}' | 'j' => {
-                self.ui.scroll_down(self.events.len());
-            }
-            // Left arrow - back to list
-            '←' | '\u{0013}' | 'h' | '\x1b' => {
-                self.ui.view = ViewMode::List;
-            }
-            // Enter - back to list
-            '\r' | '\n' => {
-                self.ui.view = ViewMode::List;
-            }
-            _ => {}
+    /// Handle a line of text input from IME
+    fn handle_line(&mut self, line: &str) {
+        log::info!("CCR: Processing line: {}", line);
+
+        // Check for special commands
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return;
         }
+
+        // Check for permission commands
+        if self.ui.has_pending_permission() {
+            match trimmed.to_lowercase().as_str() {
+                "allow" | "yes" | "y" | "a" => {
+                    self.ui.permission_choice = true;
+                    self.send_permission_response();
+                    return;
+                }
+                "deny" | "no" | "n" | "d" => {
+                    self.ui.permission_choice = false;
+                    self.send_permission_response();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Otherwise treat as user input to send
+        self.ui.input_text = String::from(trimmed);
+        self.send_user_input();
     }
 
-    /// Handle key in permission view
-    fn handle_key_permission(&mut self, key: char) {
-        match key {
-            // Left/Right - toggle choice
-            '←' | '\u{0013}' | 'h' => {
-                self.ui.permission_choice = true; // Allow
-            }
-            '→' | '\u{0014}' | 'l' => {
-                self.ui.permission_choice = false; // Deny
-            }
-            // Enter - confirm choice
-            '\r' | '\n' | '∴' => {
-                self.send_permission_response();
-            }
-            // Escape - cancel (back to list)
-            '\x1b' => {
-                self.ui.view = ViewMode::List;
-            }
-            // Up - back to list
-            '↑' | '\u{0011}' | 'k' => {
-                self.ui.view = ViewMode::List;
-            }
-            _ => {}
+    /// Send user input via MQTT
+    fn send_user_input(&mut self) {
+        let text = self.ui.input_get().to_string();
+        if text.is_empty() {
+            return;
         }
+
+        let payload = format!(
+            r#"{{"session_id":"{}","text":"{}"}}"#,
+            self.ui.session_id,
+            text.replace('"', "\\\"")
+        );
+
+        log::info!("CCR: Sending user input: {}", text);
+
+        // Publish to MQTT
+        #[cfg(feature = "hosted")]
+        {
+            if let Ok(mut state) = self.mqtt_state.lock() {
+                let packet_id = state.next_packet_id();
+                if let Some(stream) = &mut state.stream {
+                    let publish = mqtt::build_publish_packet(
+                        "ccr/user_input",
+                        payload.as_bytes(),
+                        packet_id
+                    );
+                    use std::io::Write as IoWrite;
+                    let _ = stream.write_all(&publish);
+                    let _ = stream.flush();
+                }
+            }
+        }
+
+        // Add to event queue
+        self.events.push(CcrEvent::UserInput {
+            text,
+            session_id: self.ui.session_id.clone(),
+        });
+
+        // Clear input
+        self.ui.input_clear();
+        self.ui.auto_scroll(self.events.len());
     }
 
     /// Send permission response via MQTT
@@ -367,8 +404,23 @@ impl CcrApp {
 
             log::info!("CCR: Sending permission response: {}", payload);
 
-            // TODO: Actually send via MQTT
-            // mqtt_publish(TOPIC_PERM_RESPONSE, payload.as_bytes());
+            // Actually publish to MQTT
+            #[cfg(feature = "hosted")]
+            {
+                if let Ok(mut state) = self.mqtt_state.lock() {
+                    let packet_id = state.next_packet_id();
+                    if let Some(stream) = &mut state.stream {
+                        let publish = mqtt::build_publish_packet(
+                            TOPIC_PERM_RESPONSE,
+                            payload.as_bytes(),
+                            packet_id
+                        );
+                        use std::io::Write as IoWrite;
+                        let _ = stream.write_all(&publish);
+                        let _ = stream.flush();
+                    }
+                }
+            }
 
             // Add resolved event to queue
             self.events.push(CcrEvent::PermissionResolved {
@@ -377,9 +429,9 @@ impl CcrApp {
                 session_id: self.ui.session_id.clone(),
             });
 
-            // Clear pending and return to list
+            // Clear pending and return to chat
             self.ui.clear_pending_permission();
-            self.ui.view = ViewMode::List;
+            self.ui.view = ViewMode::Chat;
             self.ui.auto_scroll(self.events.len());
         }
     }
@@ -406,73 +458,195 @@ impl CcrApp {
     fn redraw(&mut self) {
         self.clear_area();
 
-        // Render content based on view
-        let content = match self.ui.view {
-            ViewMode::List => {
-                let header = ui::render_header(&self.ui);
-                let list = ui::render_event_list(&self.events, &self.ui);
-                let footer = ui::render_footer(&self.ui);
-
-                let mut output = String::new();
-                writeln!(output, "{}", header).ok();
-                writeln!(output, "──────────────────────────────────────────").ok();
-                write!(output, "{}", list).ok();
-                writeln!(output, "──────────────────────────────────────────").ok();
-                write!(output, "{}", footer).ok();
-                output
-            }
-            ViewMode::Detail => {
-                let header = ui::render_header(&self.ui);
-                let detail = if let Some(event) = self.events.get(self.ui.selected) {
-                    ui::render_event_detail(event)
-                } else {
-                    String::from("  No event selected")
-                };
-                let footer = ui::render_footer(&self.ui);
-
-                let mut output = String::new();
-                writeln!(output, "{}", header).ok();
-                writeln!(output, "──────────────────────────────────────────").ok();
-                write!(output, "{}", detail).ok();
-                writeln!(output).ok();
-                writeln!(output, "──────────────────────────────────────────").ok();
-                write!(output, "{}", footer).ok();
-                output
-            }
+        match self.ui.view {
+            ViewMode::Chat => self.redraw_chat(),
+            ViewMode::Detail => self.redraw_detail(),
             ViewMode::Permission => {
-                // Find the pending permission event
-                let perm_event = self.ui.pending_permission.as_ref().and_then(|req_id| {
-                    self.events.iter().find(|e| e.request_id() == Some(req_id))
-                });
+                // Permissions shown inline in Chat view
+                self.ui.view = ViewMode::Chat;
+                self.redraw_chat();
+            }
+        }
 
-                if let Some(event) = perm_event {
-                    ui::render_permission_dialog(event, self.ui.permission_choice)
-                } else {
-                    // No permission found, go back to list
-                    self.ui.view = ViewMode::List;
-                    String::from("  No pending permission")
+        self.gam.redraw().expect("Could not redraw screen");
+    }
+
+    /// Redraw chat view with bubbles
+    fn redraw_chat(&mut self) {
+        // Use clear_area on canvas to avoid dirty rendering
+        self.clear_area();
+
+        // Start from bottom of content area, grow upward
+        let mut bubble_baseline = self.screensize.y - MARGIN_Y;
+
+        // Track if there are more events above (older) that aren't shown
+        let mut has_more_above = false;
+
+        // Draw events from newest to oldest (bottom to top)
+        // Iterate by index in reverse since EventQueueIter doesn't support .rev()
+        let event_count = self.events.len();
+        let mut first_shown_idx: Option<usize> = None;
+
+        for i in (0..event_count).rev() {
+            let event = match self.events.get(i) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            if bubble_baseline <= 0 {
+                // There are more events we couldn't show
+                has_more_above = true;
+                break;
+            }
+
+            first_shown_idx = Some(i);
+
+            // (text, is_user_input, border_width, font_style)
+            // Use Regular for most content, Bold only for short titles
+            let (text, is_user_input, border_width, font_style) = match event {
+                CcrEvent::SessionStart { source, .. } => {
+                    (format!("Session {}", source), false, 1, GlyphStyle::Regular)
                 }
+                CcrEvent::SessionEnd { reason, .. } => {
+                    (format!("End: {}", reason), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::Stop { .. } => {
+                    (String::from("Stopped"), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::UserInput { text, .. } => {
+                    (truncate_str(text, 40).to_string(), true, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::ToolCall { tool, args, .. } => {
+                    // Tool name as title, args on next line in regular font
+                    (format!("{}\n{}", tool, truncate_str(args, 30)), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::ToolResult { output, .. } => {
+                    (truncate_str(output, 35).to_string(), false, 1, GlyphStyle::Monospace)
+                }
+                CcrEvent::PermissionPending { tool, command, .. } => {
+                    // Permission request - render like other events
+                    (format!("PERMISSION: {}\n{}", tool, truncate_str(command, 30)), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::PermissionResolved { decision, .. } => {
+                    (format!("Permission {}", decision), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::PermissionTimeout { .. } => {
+                    (String::from("Permission timeout"), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::Notification { message, .. } => {
+                    (truncate_str(message, 35).to_string(), false, 1, GlyphStyle::Regular)
+                }
+                CcrEvent::Status { connected, message } => {
+                    let status = if *connected { "Connected" } else { "Disconnected" };
+                    (format!("{}: {}", status, truncate_str(message, 25)), false, 1, GlyphStyle::Regular)
+                }
+            };
+
+            // Create bubble - right-align for user input, left-align for others
+            let mut bubble_tv = if is_user_input {
+                TextView::new(
+                    self.content,
+                    TextBounds::GrowableFromBr(
+                        Point::new(self.screensize.x - MARGIN_X, bubble_baseline),
+                        self.bubble_width,
+                    ),
+                )
+            } else {
+                TextView::new(
+                    self.content,
+                    TextBounds::GrowableFromBl(
+                        Point::new(MARGIN_X, bubble_baseline),
+                        self.bubble_width,
+                    ),
+                )
+            };
+
+            bubble_tv.border_width = border_width;
+            bubble_tv.draw_border = true;
+            bubble_tv.clear_area = true;
+            bubble_tv.rounded_border = Some(BUBBLE_RADIUS);
+            bubble_tv.style = font_style;
+            bubble_tv.margin = self.bubble_margin;
+            bubble_tv.ellipsis = false;
+            // Use thicker border for selected bubble (invert requires trust level)
+            if self.ui.is_selected(i) {
+                bubble_tv.border_width = 2;
+            }
+            write!(bubble_tv.text, "{}", text).ok();
+            self.gam.post_textview(&mut bubble_tv).expect("couldn't render bubble");
+
+            if let Some(bounds) = bubble_tv.bounds_computed {
+                bubble_baseline -= (bounds.br.y - bounds.tl.y) + BUBBLE_SPACE + self.bubble_margin.y;
+            }
+        }
+
+        // Show "more" indicator at top if there are hidden events
+        if has_more_above {
+            let mut more_tv = TextView::new(
+                self.content,
+                TextBounds::GrowableFromTl(
+                    Point::new(MARGIN_X, MARGIN_Y),
+                    (self.screensize.x - MARGIN_X * 2) as u16,
+                ),
+            );
+            more_tv.style = GlyphStyle::Small;
+            more_tv.draw_border = false;
+            more_tv.clear_area = false;
+            write!(more_tv.text, "> more").ok();
+            self.gam.post_textview(&mut more_tv).expect("couldn't render more indicator");
+        }
+
+        // If no events, show waiting message
+        if self.events.is_empty() {
+            let mut wait_tv = TextView::new(
+                self.content,
+                TextBounds::CenteredTop(Rectangle::new(
+                    Point::new(0, self.screensize.y / 3),
+                    Point::new(self.screensize.x, self.screensize.y / 3 + 40),
+                )),
+            );
+            wait_tv.style = GlyphStyle::Regular;
+            wait_tv.draw_border = false;
+            let status = if self.ui.connected { "connected" } else { "waiting" };
+            write!(wait_tv.text, "CCR: {}", status).ok();
+            self.gam.post_textview(&mut wait_tv).expect("couldn't render wait text");
+        }
+    }
+
+    /// Redraw detail view
+    fn redraw_detail(&mut self) {
+        // Clear the content area first
+        // Use clear_area on canvas
+        self.clear_area();
+
+        let event = match self.events.get(self.ui.selected) {
+            Some(e) => e,
+            None => {
+                // No valid selection, go back to chat view
+                self.ui.view = ViewMode::Chat;
+                return;
             }
         };
 
-        // Create text view
+        let detail = ui_improved::render_event_detail(event);
+
         let mut text_view = TextView::new(
             self.content,
-            TextBounds::GrowableFromBr(
-                Point::new(self.screensize.x - 10, self.screensize.y - 10),
-                (self.screensize.x - 20) as u16,
+            TextBounds::GrowableFromTl(
+                Point::new(MARGIN_X, MARGIN_Y),
+                (self.screensize.x - MARGIN_X * 2) as u16,
             ),
         );
 
-        text_view.style = GlyphStyle::Small;
-        text_view.border_width = 0;
-        text_view.draw_border = false;
+        text_view.style = GlyphStyle::Regular;
+        text_view.border_width = 1;
+        text_view.draw_border = true;
         text_view.clear_area = true;
+        text_view.rounded_border = Some(BUBBLE_RADIUS);
+        text_view.margin = self.bubble_margin;
 
-        write!(text_view.text, "{}", content).expect("Could not write to text view");
-
-        self.gam.post_textview(&mut text_view).expect("Could not render text view");
-        self.gam.redraw().expect("Could not redraw screen");
+        write!(text_view.text, "{}", detail).ok();
+        self.gam.post_textview(&mut text_view).expect("Could not render detail view");
     }
 
     /// Add demo events for testing
@@ -573,6 +747,8 @@ fn mqtt_thread_main(
                 // Subscribe to topics
                 {
                     let mut st = state.lock().unwrap();
+
+                    // Subscribe to events topic
                     let packet_id = st.next_packet_id();
                     let sub_packet = mqtt::build_subscribe_packet(packet_id, TOPIC_EVENTS);
                     if let Err(e) = stream.write_all(&sub_packet) {
@@ -581,6 +757,16 @@ fn mqtt_thread_main(
                     }
                     stream.flush().ok();
                     log::info!("CCR MQTT: Subscribed to {}", TOPIC_EVENTS);
+
+                    // Subscribe to permission requests topic
+                    let packet_id = st.next_packet_id();
+                    let sub_packet = mqtt::build_subscribe_packet(packet_id, TOPIC_PERM_REQUEST);
+                    if let Err(e) = stream.write_all(&sub_packet) {
+                        log::error!("CCR MQTT: Failed to send SUBSCRIBE: {:?}", e);
+                        continue;
+                    }
+                    stream.flush().ok();
+                    log::info!("CCR MQTT: Subscribed to {}", TOPIC_PERM_REQUEST);
                 }
 
                 // Update state and notify main thread
@@ -713,22 +899,29 @@ fn main() -> ! {
                 log::debug!("CCR: Redraw");
                 app.redraw();
             }
-            Some(CcrOp::KeyPress) => {
-                log::debug!("CCR: KeyPress");
-                // TODO: Extract key from message
+            Some(CcrOp::Line) => {
+                // A line of text from IME
+                let buffer = unsafe { xous_ipc::Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
+                let line = buffer.as_flat::<String, _>().unwrap();
+                log::info!("CCR: Got input line: {}", line.as_str());
+                app.handle_line(line.as_str());
+                app.redraw();
             }
             Some(CcrOp::RawKey) => {
-                // Extract raw keys from scalar message
-                if let xous::Message::Scalar(scalar) = msg.body {
-                    for &key_val in &[scalar.arg1, scalar.arg2, scalar.arg3, scalar.arg4] {
-                        if key_val != 0 {
-                            if let Some(c) = char::from_u32(key_val as u32) {
-                                app.handle_key(c);
-                                app.redraw();
-                            }
-                        }
+                // Raw key event for d-pad navigation
+                xous::msg_scalar_unpack!(msg, k1, k2, k3, k4, {
+                    let keys = [
+                        core::char::from_u32(k1 as u32),
+                        core::char::from_u32(k2 as u32),
+                        core::char::from_u32(k3 as u32),
+                        core::char::from_u32(k4 as u32),
+                    ];
+                    for key in keys.iter().flatten() {
+                        log::debug!("CCR: RawKey '{}'", key);
+                        app.handle_rawkey(*key);
                     }
-                }
+                });
+                app.redraw();
             }
             Some(CcrOp::MqttMessage) => {
                 match &msg.body {
